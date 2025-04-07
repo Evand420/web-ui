@@ -37,6 +37,37 @@ from gradio.themes import Citrus, Default, Glass, Monochrome, Ocean, Origin, Sof
 from src.utils.utils import update_model_dropdown, get_latest_files, capture_screenshot, MissingAPIKeyError
 from src.utils import utils
 
+import openai  # Ensure you have the OpenAI Python library installed
+
+# Add this function to process user input using OpenAI's GPT
+def process_user_input(input_text, api_key, model="gpt-4"):
+    """
+    Process user input using OpenAI's GPT model to understand intent and extract information.
+    """
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": input_text}
+            ]
+        )
+        return response['choices'][0]['message']['content']
+    except Exception as e:
+        logger.error(f"Error processing user input: {str(e)}")
+        return "Sorry, I couldn't process your request."
+
+# Example usage in the UI
+def handle_task_with_language_understanding(task_description, api_key):
+    """
+    Handle the task description by understanding it using NLP and performing the required actions.
+    """
+    understood_task = process_user_input(task_description, api_key)
+    logger.info(f"Understood Task: {understood_task}")
+    # Perform actions based on the understood task
+    return understood_task
+
 # Global variables for persistence
 _global_browser = None
 _global_browser_context = None
@@ -1189,6 +1220,37 @@ def create_ui(theme_name="Ocean"):
             inputs=[config_file_input],
             outputs=all_components + [config_status]
         )
+
+        # Update the Gradio UI to include language understanding
+        with gr.TabItem("🤖 Run Agent with NLP", id=9):
+            task_with_nlp = gr.Textbox(
+                label="Task Description (with NLP)",
+                lines=4,
+                placeholder="Describe your task in natural language...",
+                value="Search for the latest news about AI and summarize it.",
+                info="Enter a task description in natural language.",
+                interactive=True
+            )
+            nlp_api_key = gr.Textbox(
+                label="OpenAI API Key",
+                type="password",
+                value="",
+                info="Your OpenAI API key for language understanding.",
+                interactive=True
+            )
+            nlp_result_output = gr.Textbox(
+                label="Understood Task",
+                lines=3,
+                show_label=True
+            )
+            run_nlp_button = gr.Button("▶️ Run with NLP", variant="primary", scale=2)
+
+            run_nlp_button.click(
+                fn=handle_task_with_language_understanding,
+                inputs=[task_with_nlp, nlp_api_key],
+                outputs=nlp_result_output
+            )
+    
     return demo
 
 
@@ -1206,3 +1268,186 @@ def main():
 if __name__ == '__main__':
     if __name__ == "__main__":
         main()
+
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+
+def scrape_code_from_website(url, selector=None):
+    """
+    Scrape code snippets from a website.
+    :param url: The URL of the website to scrape.
+    :param selector: Optional CSS selector to target specific elements.
+    :return: Extracted code snippets or an error message.
+    """
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url)
+
+            # Get the page content
+            content = page.content()
+            browser.close()
+
+        # Parse the HTML content
+        soup = BeautifulSoup(content, 'html.parser')
+
+        # Extract code snippets
+        if selector:
+            elements = soup.select(selector)
+        else:
+            elements = soup.find_all('code')  # Default to <code> tags
+
+        code_snippets = [element.get_text() for element in elements]
+        return "\n\n".join(code_snippets) if code_snippets else "No code snippets found."
+    except Exception as e:
+        return f"Error scraping website: {str(e)}"
+
+import requests
+
+def scrape_bot_responses(bot_url, queries):
+    """
+    Scrape responses from an AI bot by sending queries.
+    :param bot_url: The URL of the bot's API or endpoint.
+    :param queries: A list of queries to send to the bot.
+    :return: A dictionary of queries and their corresponding responses.
+    """
+    responses = {}
+    for query in queries:
+        try:
+            response = requests.post(bot_url, json={"query": query})
+            if response.status_code == 200:
+                responses[query] = response.json().get("response", "No response")
+            else:
+                responses[query] = f"Error: {response.status_code}"
+        except Exception as e:
+            responses[query] = f"Error: {str(e)}"
+    return responses
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+
+def train_custom_model(data, model_name="gpt-2"):
+    """
+    Train a custom AI model using scraped data.
+    :param data: A dictionary of queries and responses.
+    :param model_name: The base model to fine-tune.
+    :return: The fine-tuned model and tokenizer.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    # Prepare the dataset
+    train_texts = [f"User: {query}\nBot: {response}" for query, response in data.items()]
+    train_encodings = tokenizer(train_texts, truncation=True, padding=True, max_length=512)
+
+    # Fine-tune the model
+    training_args = TrainingArguments(
+        output_dir="./results",
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        save_steps=10_000,
+        save_total_limit=2,
+    )
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_encodings,
+    )
+    trainer.train()
+
+    # Save the fine-tuned model
+    model.save_pretrained("./fine_tuned_model")
+    tokenizer.save_pretrained("./fine_tuned_model")
+
+    return model, tokenizer
+
+from fastapi import FastAPI
+from transformers import pipeline
+
+app = FastAPI()
+
+# Load the fine-tuned model
+model_name = "./results"
+bot_pipeline = pipeline("text-generation", model=model_name)
+
+@app.post("/clone-bot")
+def clone_bot(query: str):
+    """
+    Respond to user queries using the cloned bot.
+    :param query: The user's query.
+    :return: The bot's response.
+    """
+    response = bot_pipeline(f"User: {query}\nBot:", max_length=100, num_return_sequences=1)
+    return {"response": response[0]["generated_text"]}
+
+from playwright.sync_api import sync_playwright
+
+def clone_app_frontend(url, save_path="./cloned_app"):
+    """
+    Clone the frontend of a web app by saving its HTML, CSS, and JS.
+    :param url: The URL of the app to clone.
+    :param save_path: The directory to save the cloned files.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url)
+
+        # Save the HTML
+        html_content = page.content()
+        with open(f"{save_path}/index.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        # Save the CSS and JS files (if accessible)
+        for link in page.query_selector_all("link[rel='stylesheet']"):
+            href = link.get_attribute("href")
+            if href:
+                css_content = requests.get(href).text
+                with open(f"{save_path}/{href.split('/')[-1]}", "w", encoding="utf-8") as f:
+                    f.write(css_content)
+
+        for script in page.query_selector_all("script[src]"):
+            src = script.get_attribute("src")
+            if src:
+                js_content = requests.get(src).text
+                with open(f"{save_path}/{src.split('/')[-1]}", "w", encoding="utf-8") as f:
+                    f.write(js_content)
+
+        browser.close()
+
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+
+# Initialize Slack client
+slack_token = "your-slack-bot-token"
+slack_client = WebClient(token=slack_token)
+
+def send_message_to_slack(channel, message):
+    """
+    Send a message to a Slack channel.
+    :param channel: The Slack channel ID or name.
+    :param message: The message to send.
+    :return: Response from Slack API or error message.
+    """
+    try:
+        response = slack_client.chat_postMessage(channel=channel, text=message)
+        return f"Message sent to {channel}: {response['message']['text']}"
+    except SlackApiError as e:
+        return f"Error sending message: {e.response['error']}"
+
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
+from datasets import load_dataset
+
+# Load a dataset
+dataset = load_dataset("imdb")  # IMDB movie reviews dataset
+
+# Define the Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["test"],
+)
+
+# Train the model
+trainer.train()
